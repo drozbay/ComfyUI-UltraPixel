@@ -19,10 +19,8 @@ def get_models(base):
 def download_models(ultrapixel_directory, stablecascade_directory):
     models = [
         ["ultrapixel_t2i.safetensors", "2kpr/UltraPixel"],
-        ["stage_a.safetensors", "stabilityai/stable-cascade"],
         ["previewer.safetensors", "stabilityai/stable-cascade"],
         ["effnet_encoder.safetensors", "stabilityai/stable-cascade"],
-        ["stage_b_lite_bf16.safetensors", "stabilityai/stable-cascade"],
         ["stage_c_bf16.safetensors", "stabilityai/stable-cascade"],
         ["controlnet/canny.safetensors", "stabilityai/stable-cascade"],
     ]
@@ -64,8 +62,6 @@ class UltraPixelLoad:
         return {
             "required": {
                 "ultrapixel": (get_models("ultrapixel_t2i.safetensors"),),
-                "stage_a": (get_models("stage_a.safetensors"),),
-                "stage_b": (get_models("stage_b_lite_bf16.safetensors"),),
                 "stage_c": (get_models("stage_c_bf16.safetensors"),),
                 "effnet": (get_models("effnet_encoder.safetensors"),),
                 "previewer": (get_models("previewer.safetensors"),),
@@ -97,8 +93,6 @@ class UltraPixelLoad:
     def ultrapixel(
         self,
         ultrapixel,
-        stage_a,
-        stage_b,
         stage_c,
         effnet,
         previewer,
@@ -109,8 +103,6 @@ class UltraPixelLoad:
         download_models(ultrapixel_directory, stablecascade_directory)
         model = up.UltraPixel(
             ultrapixel,
-            stage_a,
-            stage_b,
             stage_c,
             effnet,
             previewer,
@@ -127,25 +119,24 @@ class UltraPixelProcess:
         return {
             "required": {
                 "model": ("ULTRAPIXELMODEL",),
-                "height": (
+                "height_c": (
                     "INT",
-                    {"default": 2048, "min": 512, "max": 5120, "step": 8},
+                    {"default": 48, "min": 1, "max": 512, "step": 1},
                 ),
-                "width": (
+                "width_c": (
                     "INT",
-                    {"default": 2048, "min": 512, "max": 5120, "step": 8},
+                    {"default": 48, "min": 1, "max": 512, "step": 1},
+                ),
+                "height_c_lr": (
+                    "INT",
+                    {"default": 24, "min": 1, "max": 512, "step": 1},
+                ),
+                "width_c_lr": (
+                    "INT",
+                    {"default": 24, "min": 1, "max": 512, "step": 1},
                 ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "dtype": (["bf16", "fp32"],),
-                "stage_a_tiled": (["true", "false"],),
-                "stage_b_steps": (
-                    "INT",
-                    {"default": 10, "min": 1, "max": 1000, "step": 1},
-                ),
-                "stage_b_cfg": (
-                    "FLOAT",
-                    {"default": 1.1, "min": 1.0, "max": 1000.0, "step": 0.1},
-                ),
                 "stage_c_steps": (
                     "INT",
                     {"default": 20, "min": 1, "max": 1000, "step": 1},
@@ -162,6 +153,7 @@ class UltraPixelProcess:
                     "STRING",
                     {"multiline": True, "dynamicPrompts": True},
                 ),
+                "sampler": ("SAMPLER", ),
             },
             "optional": {
                 "controlnet_image": ("IMAGE",),
@@ -169,8 +161,9 @@ class UltraPixelProcess:
         }
 
     RETURN_TYPES = (
-        "IMAGE",
-        "IMAGE",
+        "LATENT",
+        #"IMAGE",
+        #"IMAGE",
     )
     RETURN_NAMES = ("image", "edge_preview")
     FUNCTION = "ultrapixel"
@@ -179,36 +172,35 @@ class UltraPixelProcess:
     def ultrapixel(
         self,
         model,
-        height,
-        width,
+        height_c,
+        width_c,
+        height_c_lr,
+        width_c_lr,
         seed,
         dtype,
-        stage_a_tiled,
-        stage_b_steps,
-        stage_b_cfg,
         stage_c_steps,
         stage_c_cfg,
         controlnet_weight,
         prompt,
+        sampler,
         controlnet_image=None,
     ):
         model.set_config(
-            height,
-            width,
+            height_c,
+            width_c,
+            height_c_lr,
+            width_c_lr,
             seed,
             dtype,
-            stage_a_tiled,
-            stage_b_steps,
-            stage_b_cfg,
             stage_c_steps,
             stage_c_cfg,
             controlnet_weight,
             prompt,
+            sampler,
             controlnet_image,
         )
-        image, edge_preview = model.process()
-        return (image, edge_preview)
-
+        latent_out = model.process()
+        return latent_out
 
 NODE_CLASS_MAPPINGS = {
     "UltraPixelLoad": UltraPixelLoad,

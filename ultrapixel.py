@@ -6,13 +6,9 @@ import folder_paths
 
 from .inference.utils import *
 from .core.utils import load_or_fail
-from .train import WurstCore_control_lrguide, WurstCoreB
+from .train import WurstCore_control_lrguide
 from .gdf import (
-    VPScaler,
-    CosineTNoiseCond,
     DDPMSampler,
-    P2LossWeight,
-    AdaptiveLossWeight,
 )
 from .train import WurstCore_t2i as WurstCoreC
 
@@ -22,8 +18,6 @@ class UltraPixel:
     def __init__(
         self,
         pretrained,
-        stage_a,
-        stage_b,
         stage_c,
         effnet,
         previewer,
@@ -54,8 +48,6 @@ class UltraPixel:
         else:
             self.stablecascade_path = stablecascade_directory
         self.pretrained = os.path.join(self.ultrapixel_path, pretrained)
-        self.stage_a = os.path.join(self.stablecascade_path, stage_a)
-        self.stage_b = os.path.join(self.stablecascade_path, stage_b)
         self.stage_c = os.path.join(self.stablecascade_path, stage_c)
         self.effnet = os.path.join(self.stablecascade_path, effnet)
         self.previewer = os.path.join(self.stablecascade_path, previewer)
@@ -63,30 +55,30 @@ class UltraPixel:
 
     def set_config(
         self,
-        height,
-        width,
+        height_c,
+        width_c,
+        height_c_lr,
+        width_c_lr,
         seed,
         dtype,
-        stage_a_tiled,
-        stage_b_steps,
-        stage_b_cfg,
         stage_c_steps,
         stage_c_cfg,
         controlnet_weight,
         prompt,
+        sampler,
         controlnet_image,
     ):
-        self.height = height
-        self.width = width
+        self.height_c = height_c
+        self.width_c = width_c
+        self.height_c_lr = height_c_lr
+        self.width_c_lr = width_c_lr
         self.seed = seed
         self.dtype = dtype
-        self.stage_a_tiled = True if stage_a_tiled == "true" else False
-        self.stage_b_steps = stage_b_steps
-        self.stage_b_cfg = stage_b_cfg
         self.stage_c_steps = stage_c_steps
         self.stage_c_cfg = stage_c_cfg
         self.controlnet_weight = controlnet_weight
         self.prompt = prompt
+        self.sampler = sampler
         self.controlnet_image = controlnet_image
 
 
@@ -119,36 +111,14 @@ class UltraPixel:
                 config_dict=loaded_config, device=device, training=False
             )
 
-        config_file_b = os.path.join(base_path, "configs/inference/stage_b_1b.yaml")
-        with open(config_file_b, "r", encoding="utf-8") as file:
-            config_file_b = yaml.safe_load(file)
-            config_file_b["effnet_checkpoint_path"] = self.effnet
-            config_file_b["stage_a_checkpoint_path"] = self.stage_a
-            config_file_b["generator_checkpoint_path"] = self.stage_b
-        core_b = WurstCoreB(config_dict=config_file_b, device=device, training=False)
-
         extras = core.setup_extras_pre()
         models = core.setup_models(extras)
         models.generator.eval().requires_grad_(False)
         # print("STAGE C READY")
-
-        extras_b = core_b.setup_extras_pre()
-        models_b = core_b.setup_models(
-            extras_b,
-            skip_clip=True,
-            tokenizer=models.tokenizer,
-            text_model=models.text_model,
-        )
-        models_b.generator.bfloat16().eval().requires_grad_(False)
-        # print("STAGE B READY")
-
-        captions = [self.prompt]
-        height, width = self.height, self.width
             
         sdd = load_safetensors(self.pretrained) # this is the equivalent code for loading the real safetensors versions of ultrapixel_t2i and lora_cat.
         collect_sd = {k: v for k, v in sdd.items()}
         collect_sd = {k[7:] if k.startswith('module.') else k: v for k, v in collect_sd.items()}
-        models.train_norm.load_state_dict(collect_sd)
 
         if self.controlnet_image == None:
             models.train_norm.load_state_dict(collect_sd)
@@ -179,27 +149,23 @@ class UltraPixel:
             batch = {"images": images}
             cnet_multiplier = self.controlnet_weight  # 0.8 0.6 0.3  control strength
 
-        height_lr, width_lr = get_target_lr_size(height / width, std_size=32)
-        stage_c_latent_shape, stage_b_latent_shape = calculate_latent_sizes(
-            height, width, batch_size=batch_size
-        )
-        stage_c_latent_shape_lr, stage_b_latent_shape_lr = calculate_latent_sizes(
-            height_lr, width_lr, batch_size=batch_size
-        )
+        """ 
+        Calculate latent shapes. get_target_lr_size() preserves the aspect ratio. 1536x2560 becomes 24.79x41.31, which is not ideal. Rounds down with int() cast, then multiplies by 32, so this becomes 768x1312.
+        stage_b_latent_shape_lr is unused.
+        """
+        
+        stage_c_latent_shape    = (batch_size, 16, self.height_c,    self.width_c)
+        stage_c_latent_shape_lr = (batch_size, 16, self.height_c_lr, self.width_c_lr)
 
         # Stage C Parameters
         extras.sampling_configs["cfg"] = self.stage_c_cfg
         extras.sampling_configs["shift"] = 1 if self.controlnet_image == None else 2
         extras.sampling_configs["timesteps"] = self.stage_c_steps
         extras.sampling_configs["t_start"] = 1.0
+        #extras.sampling_configs["sampler"] = self.sampler
         extras.sampling_configs["sampler"] = DDPMSampler(extras.gdf)
 
-        # Stage B Parameters
-        extras_b.sampling_configs["cfg"] = self.stage_b_cfg
-        extras_b.sampling_configs["shift"] = 1
-        extras_b.sampling_configs["timesteps"] = self.stage_b_steps
-        extras_b.sampling_configs["t_start"] = 1.0
-
+        captions = [self.prompt] #POSITIVE PROMPT
         for cnt, caption in enumerate(captions):
             with torch.no_grad():
                 models.generator.cpu()
@@ -245,13 +211,6 @@ class UltraPixel:
                     edge_images = show_images(cnet_input)
                     edge_image = edge_images[0]
 
-                conditions_b = core_b.get_conditions(
-                    batch, models_b, extras_b, is_eval=True, is_unconditional=False
-                )
-                unconditions_b = core_b.get_conditions(
-                    batch, models_b, extras_b, is_eval=True, is_unconditional=True
-                )
-
                 models.text_model.cpu()
                 if self.controlnet_image != None:
                     models.controlnet.cpu()
@@ -274,22 +233,7 @@ class UltraPixel:
 
                 models.generator.cpu()
                 torch.cuda.empty_cache()
+                
+                return ({'samples': sampled_c},)
 
-                conditions_b["effnet"] = sampled_c
-                unconditions_b["effnet"] = torch.zeros_like(sampled_c)
-                print("STAGE B + A DECODING***************************")
-
-                with torch.cuda.amp.autocast(dtype=dtype):
-                    sampled = decode_b(
-                        conditions_b,
-                        unconditions_b,
-                        models_b,
-                        stage_b_latent_shape,
-                        extras_b,
-                        device,
-                        stage_a_tiled=self.stage_a_tiled,
-                    )
-
-                torch.cuda.empty_cache()
-                imgs = show_images(sampled)
-                return imgs[0], edge_image
+                return edge_image
